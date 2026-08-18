@@ -93,8 +93,21 @@ If it returns sse4_1, sse4_2, or avx — the official Google binaries will work.
    ```
 
 2. Pass the TPU into the container and mount the libraries over Frigate's
-   own. On **openmediavault** this is the compose file under
-   **Services → Compose → Files**, not a file you edit over SSH.
+   own.
+
+   Where the compose file lives depends on how Docker is managed. On
+   **openmediavault** with the `openmediavault-compose` plugin it is under
+   **Services → Compose → Files** — edit it there, not over SSH, or the
+   plugin will overwrite you. With Portainer it is the stack editor. If you
+   are not sure, ask Docker:
+
+   ```bash
+   docker inspect frigate \
+     --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
+   ```
+
+   Empty output means the container was not started by compose at all
+   (a plain `docker run`, or a Portainer container rather than a stack).
 
    ```yaml
    devices:
