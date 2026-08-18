@@ -1,0 +1,99 @@
+# Kernel compatibility patch for google/gasket-driver
+#
+# Upstream: https://github.com/google/gasket-driver @ 5815ee3
+# Apply from the top of the gasket-driver checkout with `patch -p1`.
+#
+# Every change is guarded by LINUX_VERSION_CODE, so one patched tree builds
+# on every kernel from 4.x through 7.x. That matters on openmediavault,
+# where DKMS rebuilds the module for every installed kernel -- typically a
+# Debian stock kernel and a Proxmox kernel side by side.
+#
+# 1. gasket_core.c    - `no_llseek` was deleted in 6.12.
+# 2. gasket_page_table.c - symbol namespaces became string literals in 6.13.
+# 3. gasket_page_table.c - dma_buf_map_attachment()/dma_buf_unmap_attachment()
+#                          started requiring the caller to hold the dma_buf
+#                          reservation lock in 6.2; the *_unlocked() variants
+#                          are the ones this call site wants.
+#
+# Verified to compile clean (no errors, no warnings) against v6.8, v6.12,
+# v6.14, v6.17 and v7.0.
+
+--- a/src/gasket_core.c
++++ b/src/gasket_core.c
+@@ -1373,7 +1373,13 @@
+ /* File operations for all Gasket devices. */
+ static const struct file_operations gasket_file_ops = {
+ 	.owner = THIS_MODULE,
++	/*
++	 * `no_llseek` was removed in kernel 6.12; since then a NULL
++	 * .llseek already means "seeking not supported" (-ESPIPE).
++	 */
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+ 	.llseek = no_llseek,
++#endif
+ 	.mmap = gasket_mmap,
+ 	.open = gasket_open,
+ 	.release = gasket_release,
+--- a/src/gasket_page_table.c
++++ b/src/gasket_page_table.c
+@@ -54,7 +54,29 @@
+ #include <linux/vmalloc.h>
+ 
+ #if __has_include(<linux/dma-buf.h>)
++/*
++ * Kernel 6.13 turned symbol namespaces into string literals, so the bare
++ * token no longer compiles.
++ */
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
+ MODULE_IMPORT_NS(DMA_BUF);
++#else
++MODULE_IMPORT_NS("DMA_BUF");
++#endif
++
++/*
++ * Kernel 6.2 made dma_buf_map_attachment()/dma_buf_unmap_attachment()
++ * require the dma_buf reservation lock to be held by the caller and added
++ * the *_unlocked() variants for callers (like this one) that do not hold
++ * it. Calling the locked variants here trips dma_resv_assert_held().
++ */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
++#define gasket_dma_buf_map_attachment dma_buf_map_attachment_unlocked
++#define gasket_dma_buf_unmap_attachment dma_buf_unmap_attachment_unlocked
++#else
++#define gasket_dma_buf_map_attachment dma_buf_map_attachment
++#define gasket_dma_buf_unmap_attachment dma_buf_unmap_attachment
++#endif
+ #endif
+ 
+ #include "gasket_constants.h"
+@@ -1202,7 +1224,7 @@
+ 		goto out;
+ 	}
+ 
+-	sgt = dma_buf_map_attachment(attachment, direction);
++	sgt = gasket_dma_buf_map_attachment(attachment, direction);
+ 	if (IS_ERR(sgt)) {
+ 		ret = PTR_ERR(sgt);
+ 		goto out;
+@@ -1238,7 +1260,7 @@
+ 		mutex_unlock(&pg_tbl->mutex);
+ 
+ 	if (!IS_ERR_OR_NULL(sgt))
+-		dma_buf_unmap_attachment(attachment, sgt, direction);
++		gasket_dma_buf_unmap_attachment(attachment, sgt, direction);
+ 
+ 	if (!IS_ERR_OR_NULL(attachment))
+ 		dma_buf_detach(dmabuf, attachment);
+@@ -1258,9 +1280,9 @@
+ 
+ 	list_for_each_entry_safe(mapping, tmp, &pg_tbl->dmabufs, list) {
+ 		if (!dmabuf || mapping->dmabuf == dmabuf) {
+-			dma_buf_unmap_attachment(mapping->attachment,
+-						 mapping->sgt,
+-						 mapping->direction);
++			gasket_dma_buf_unmap_attachment(mapping->attachment,
++							mapping->sgt,
++							mapping->direction);
+ 			dma_buf_detach(mapping->dmabuf, mapping->attachment);
+ 			dma_buf_put(mapping->dmabuf);
+ 			list_del(&mapping->list);
