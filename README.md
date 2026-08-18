@@ -35,7 +35,14 @@ readelf -d binaries/libedgetpu.so.1.0 | grep -c libusb   # 0 = PCIe only
 A USB-capable build — one library serving both transports, which is upstream's
 default for Linux — is produced by
 [`.github/workflows/build-libedgetpu.yml`](.github/workflows/build-libedgetpu.yml)
-and published as a release asset rather than committed here.
+and published as a release asset rather than committed here:
+
+**[libedgetpu-v1.0-usb-beta](https://github.com/thatSFguy/coral-edgetpu-legacy-cpu/releases/tag/libedgetpu-v1.0-usb-beta)**
+— `sha256 34043d3dde102ee222c7900f005c623f2e84ac01e47f704c2aae752eb126c28b`
+
+It is built from the same upstream commit as the PCIe-only binary here
+(`e35aed18`); only the bazel target differs, so PCIe behaviour is unchanged.
+Two independent CI runs produced byte-identical output.
 
 > **USB is untested on real hardware.** The build is gated on linkage,
 > glibc and instruction-set checks, but nobody has yet run a USB Coral against
@@ -192,8 +199,9 @@ The `.deb` was also built end to end from a clean checkout.
 
 Proxmox kernels carry their own patch stack on top of mainline, so this is a
 strong signal rather than a guarantee, and it is a compile-and-package check
-either way — runtime testing needs Coral hardware. If you run it on 6.17 or
-7.0, please report back in an issue.
+either way — runtime testing needs Coral hardware. **No kernel above 6.18 has
+been run against an actual Coral yet.** If you boot 6.17, 7.0 or 7.1 with this
+patch, please report back in an issue either way.
 
 ### Kernel headers
 
