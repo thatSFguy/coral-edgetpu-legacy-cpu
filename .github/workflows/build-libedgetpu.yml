@@ -204,6 +204,68 @@ jobs:
             echo "built:             ${{ github.run_id }} on ${{ github.sha }}"
           } | tee /tmp/out/BUILD-INFO.txt
 
+      # Release notes are generated here, next to the evidence, so the warning
+      # label and the verification data can never drift apart.
+      - name: Compose release notes
+        run: |
+          set -eu
+          LIB=/tmp/out/libedgetpu.so.1.0
+          cat > /tmp/out/RELEASE-NOTES.md <<EOF
+          \`libedgetpu.so.1.0\` for CPUs with **SSSE3 only** — no SSE4.1, SSE4.2 or AVX.
+          Supports **both** the PCIe/M.2 Coral and the USB Accelerator.
+
+          > ### ⚠️ The USB path is untested on real hardware
+          > Nobody involved in this build owns a Coral USB Accelerator. USB support
+          > is verified only to the extent that the transport is correctly linked
+          > and the library loads — no inference has ever been run over USB with it.
+          > **Treat this as a beta.** Please report results, good or bad, on
+          > [issue #1](https://github.com/thatSFguy/coral-edgetpu-legacy-cpu/issues/1).
+          >
+          > The **PCIe path is the tested one**, and is unchanged in behaviour from
+          > the binary in \`binaries/\` — same upstream commit, wider build target.
+
+          ### Install
+
+          Replace the library inside the Frigate container:
+
+          \`\`\`yaml
+          volumes:
+            - /opt/coral-libs/libedgetpu.so.1.0:/usr/lib/x86_64-linux-gnu/libedgetpu.so.1.0
+          \`\`\`
+
+          For USB you must also pass the device through, and pass the whole bus —
+          the Accelerator re-enumerates from \`1a6e:089a\` to \`18d1:9302\` after its
+          firmware loads, so a single device node stops being valid:
+
+          \`\`\`yaml
+          devices:
+            - /dev/bus/usb:/dev/bus/usb
+          \`\`\`
+
+          Then set \`type: edgetpu\` with \`device: usb\` in Frigate's config.
+          PCIe users keep \`device: pci\` and need no other change.
+
+          ### Verify what you downloaded
+
+          \`\`\`bash
+          sha256sum libedgetpu.so.1.0
+          readelf -d libedgetpu.so.1.0 | grep libusb   # should show libusb-1.0.so.0
+          \`\`\`
+
+          ### Build provenance
+
+          Built by [workflow run ${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          in a \`debian:bookworm\` container, matching the Frigate 0.17 runtime.
+          The build fails rather than publishing unless USB is linked, PCIe is
+          still linked, the max glibc requirement fits the container, and the
+          disassembly contains no SSE4/AVX instructions.
+
+          \`\`\`
+          $(cat /tmp/out/BUILD-INFO.txt)
+          \`\`\`
+          EOF
+          cat /tmp/out/RELEASE-NOTES.md
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
@@ -225,6 +287,10 @@ jobs:
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
+          # Pre-release until someone confirms USB on real hardware.
+          prerelease: true
+          name: "libedgetpu SSSE3 (USB + PCIe) — ${{ github.ref_name }}"
+          body_path: out/RELEASE-NOTES.md
           files: |
             out/libedgetpu.so.1.0
             out/BUILD-INFO.txt
