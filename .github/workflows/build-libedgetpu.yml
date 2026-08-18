@@ -25,6 +25,10 @@ on:
         type: boolean
         required: false
         default: false
+      release_tag:
+        description: "Publish a pre-release under this tag (e.g. libedgetpu-v1.0-usb-beta). Leave empty to only upload an artifact."
+        required: false
+        default: ""
   push:
     tags:
       - "libedgetpu-v*"
@@ -275,7 +279,10 @@ jobs:
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/libedgetpu-v')
+    # Either a libedgetpu-v* tag was pushed, or a dispatch supplied a tag to
+    # publish under. The second path exists because tag pushes are not always
+    # possible from every environment; the action creates the tag itself.
+    if: startsWith(github.ref, 'refs/tags/libedgetpu-v') || github.event.inputs.release_tag != ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -289,7 +296,8 @@ jobs:
         with:
           # Pre-release until someone confirms USB on real hardware.
           prerelease: true
-          name: "libedgetpu SSSE3 (USB + PCIe) — ${{ github.ref_name }}"
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          name: "libedgetpu SSSE3 (USB + PCIe) — ${{ github.event.inputs.release_tag || github.ref_name }}"
           body_path: out/RELEASE-NOTES.md
           files: |
             out/libedgetpu.so.1.0
