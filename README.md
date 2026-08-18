@@ -92,11 +92,28 @@ If it returns sse4_1, sse4_2, or avx — the official Google binaries will work.
      -O /opt/coral-libs/_pywrap_tensorflow_interpreter_wrapper.so
    ```
 
-2. Add to your Frigate `docker-compose.yml` volumes section:
+2. Pass the TPU into the container and mount the libraries over Frigate's
+   own. On **openmediavault** this is the compose file under
+   **Services → Compose → Files**, not a file you edit over SSH.
+
    ```yaml
+   devices:
+     # Without this the host has /dev/apex_0 but the container does not,
+     # and Frigate reports no TPU however correct everything else is.
+     - /dev/apex_0:/dev/apex_0
+
    volumes:
      - /opt/coral-libs/libedgetpu.so.1.0:/usr/lib/x86_64-linux-gnu/libedgetpu.so.1.0
      - /opt/coral-libs/_pywrap_tensorflow_interpreter_wrapper.so:/usr/local/lib/python3.11/dist-packages/tflite_runtime/_pywrap_tensorflow_interpreter_wrapper.so
+   ```
+
+   For a **USB** Coral, pass the whole bus instead — the Accelerator
+   re-enumerates from `1a6e:089a` to `18d1:9302` once its firmware uploads,
+   so a path pinned to one device node stops existing mid-startup:
+
+   ```yaml
+   devices:
+     - /dev/bus/usb:/dev/bus/usb
    ```
 
 3. Add Coral detector to Frigate `config.yml`:
@@ -104,7 +121,7 @@ If it returns sse4_1, sse4_2, or avx — the official Google binaries will work.
    detectors:
      coral:
        type: edgetpu
-       device: pci
+       device: pci      # use `usb` for a USB Accelerator
    ```
 
 4. Restart Frigate:
