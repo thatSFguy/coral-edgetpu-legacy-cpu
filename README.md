@@ -21,6 +21,28 @@ The kernel driver build in [`gasket/`](gasket/) is maintained separately from
 the binaries and targets the kernels openmediavault ships today — see
 [Kernel driver on openmediavault](#kernel-driver-on-openmediavault).
 
+## PCIe only — USB Coral is not supported by the current binary
+
+The `libedgetpu.so.1.0` committed under `binaries/` was built from bazel's
+**PCIe-only** target, so it does not link libusb and cannot see a Coral USB
+Accelerator. If you plug one in you get `No EdgeTPU was detected`, with nothing
+in the logs to explain why. Confirm for yourself:
+
+```bash
+readelf -d binaries/libedgetpu.so.1.0 | grep -c libusb   # 0 = PCIe only
+```
+
+A USB-capable build — one library serving both transports, which is upstream's
+default for Linux — is produced by
+[`.github/workflows/build-libedgetpu.yml`](.github/workflows/build-libedgetpu.yml)
+and published as a release asset rather than committed here.
+
+> **USB is untested on real hardware.** The build is gated on linkage,
+> glibc and instruction-set checks, but nobody has yet run a USB Coral against
+> it. Treat any USB release asset as a beta, and please report results on
+> [#1](https://github.com/thatSFguy/coral-edgetpu-legacy-cpu/issues/1).
+> The PCIe path is the tested one.
+
 ## Check If You Need This
 
 ```bash
@@ -121,16 +143,16 @@ stock kernel:
 
 | Source | Menu path | Kernel |
 |--------|-----------|--------|
-| Debian stock | Debian → Install Debian kernel | 6.12 LTS |
+| Debian stock | Debian → Install Debian kernel | 6.12 LTS at Trixie release; newer via `trixie-backports` (7.0, 7.1, …) |
 | Proxmox | Proxmox → Install Proxmox kernel | 6.14, 6.17, **7.0** |
 
 Every one of these needs the patch. `no_llseek` was deleted in 6.12, so even the
-Debian stock kernel on a fresh openmediavault 8 install fails to build the
-upstream driver.
+oldest Debian stock kernel on a fresh openmediavault 8 install fails to build
+the upstream driver, and each newer series has added another breakage since.
 
 ### What the patch fixes
 
-All three changes are guarded by `LINUX_VERSION_CODE`, so a single patched tree
+All four changes are guarded by `LINUX_VERSION_CODE`, so a single patched tree
 builds on old and new kernels alike. That matters on openmediavault, where DKMS
 rebuilds the module for every installed kernel — typically a Debian kernel and a
 Proxmox kernel side by side, plus whatever you boot next.
@@ -140,6 +162,7 @@ Proxmox kernel side by side, plus whatever you boot next.
 | 6.2 | `dma_buf_map_attachment()` / `dma_buf_unmap_attachment()` began requiring the caller to hold the dma\_buf reservation lock (`dma_resv_assert_held()`) | call the `*_unlocked()` variants |
 | 6.12 | `no_llseek` removed — `error: 'no_llseek' undeclared` | drop `.llseek`; a NULL `.llseek` already means `-ESPIPE` |
 | 6.13 | symbol namespaces became string literals — `error: expected ',' or ';' before 'DMA_BUF'` | `MODULE_IMPORT_NS("DMA_BUF")` |
+| 7.1 | `zap_vma_ptes()` renamed to `zap_special_vma_range()` — `error: implicit declaration of function 'zap_vma_ptes'` | call the new name |
 
 The 6.2 change is a runtime issue rather than a build failure: it only shows up
 as a `WARN` splat when a dma-buf is mapped, and only on kernels built with
@@ -162,7 +185,8 @@ no errors and no warnings:
 | v6.12 | Debian 13 stock kernel | fails | builds |
 | v6.14 | Proxmox 6.14 | fails | builds |
 | v6.17 | Proxmox 6.17 | fails | builds |
-| v7.0  | Proxmox 7.0 — the newest OMV offers | fails | builds |
+| v7.0  | Proxmox 7.0, Debian backports 7.0 | fails | builds |
+| v7.1  | Debian backports 7.1 | fails | builds |
 
 The `.deb` was also built end to end from a clean checkout.
 
@@ -229,6 +253,7 @@ Try booting with `pcie_aspm=off` (add it to `GRUB_CMDLINE_LINUX_DEFAULT` in
 | Component | Version | Source |
 |-----------|---------|--------|
 | libedgetpu | master @ e35aed1 | https://github.com/google-coral/libedgetpu |
+| libedgetpu bazel target | `libedgetpu_direct_pci.so` (**PCIe only, no USB**) | - |
 | tflite_runtime | 2.17.1 | https://github.com/tensorflow/tensorflow @ v2.17.1 |
 | Build container | debian:bookworm | Debian 12 Bookworm |
 | glibc | 2.36 | Debian 12 Bookworm |

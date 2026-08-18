@@ -9,18 +9,52 @@
 # Debian stock kernel and a Proxmox kernel side by side.
 #
 # 1. gasket_core.c    - `no_llseek` was deleted in 6.12.
-# 2. gasket_page_table.c - symbol namespaces became string literals in 6.13.
-# 3. gasket_page_table.c - dma_buf_map_attachment()/dma_buf_unmap_attachment()
+# 2. gasket_core.c    - zap_vma_ptes() was renamed zap_special_vma_range()
+#                       in 7.1.
+# 3. gasket_page_table.c - symbol namespaces became string literals in 6.13.
+# 4. gasket_page_table.c - dma_buf_map_attachment()/dma_buf_unmap_attachment()
 #                          started requiring the caller to hold the dma_buf
 #                          reservation lock in 6.2; the *_unlocked() variants
 #                          are the ones this call site wants.
 #
 # Verified to compile clean (no errors, no warnings) against v6.8, v6.12,
-# v6.14, v6.17 and v7.0.
+# v6.14, v6.17, v7.0 and v7.1.
 
 --- a/src/gasket_core.c
 +++ b/src/gasket_core.c
-@@ -1373,7 +1373,13 @@
+@@ -29,6 +29,18 @@
+ #include <linux/sched.h>
+ #include <linux/version.h>
+ 
++/*
++ * Kernel 7.1 renamed the zap helpers: zap_vma_ptes() became
++ * zap_special_vma_range(). Same signature, same EXPORT_SYMBOL_GPL, same
++ * behaviour for this call site -- the new one just also accepts
++ * VM_MIXEDMAP vmas, and gasket's are VM_PFNMAP.
++ */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
++#define gasket_zap_vma_ptes zap_special_vma_range
++#else
++#define gasket_zap_vma_ptes zap_vma_ptes
++#endif
++
+ #ifdef GASKET_KERNEL_TRACE_SUPPORT
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/gasket_mmap.h>
+@@ -920,9 +932,9 @@
+ 	 *
+ 	 * Next multiple of y: ceil_div(x, y) * y
+ 	 */
+-	zap_vma_ptes(vma, vma->vm_start + virt_offset,
+-		     DIV_ROUND_UP(mappable_region.length_bytes, PAGE_SIZE) *
+-		     PAGE_SIZE);
++	gasket_zap_vma_ptes(vma, vma->vm_start + virt_offset,
++			    DIV_ROUND_UP(mappable_region.length_bytes,
++					 PAGE_SIZE) * PAGE_SIZE);
+ 	return 0;
+ }
+ EXPORT_SYMBOL(gasket_mm_unmap_region);
+@@ -1373,7 +1385,13 @@
  /* File operations for all Gasket devices. */
  static const struct file_operations gasket_file_ops = {
  	.owner = THIS_MODULE,

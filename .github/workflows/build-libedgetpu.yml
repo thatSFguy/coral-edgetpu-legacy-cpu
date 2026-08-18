@@ -1,0 +1,230 @@
+name: Build libedgetpu (SSSE3, USB + PCIe)
+
+# Builds libedgetpu for legacy CPUs: SSSE3 only, no SSE4.1/SSE4.2/AVX.
+#
+# Runs inside debian:bookworm on purpose. The output is loaded by the Frigate
+# container's Python, and Frigate 0.17 is Debian 12 (glibc 2.36, Python 3.11).
+# Building on a newer distro produces a .so that needs a glibc the container
+# does not have -- a trivial C++ .so built on Ubuntu 24.04 already requires
+# GLIBC_2.38, and it will fail to load. The verify job enforces this.
+#
+# Target is //tflite/public:libedgetpu_direct_all.so, which links the USB and
+# the PCIe driver providers into one library. That is also upstream's default
+# for Linux. The binary currently committed under binaries/ was built from the
+# PCIe-only target, which is why it cannot see a USB Coral.
+
+on:
+  workflow_dispatch:
+    inputs:
+      libedgetpu_ref:
+        description: "git ref of google-coral/libedgetpu to build"
+        required: false
+        default: master
+      throttled:
+        description: "Build the throttled (std) variant instead of max"
+        type: boolean
+        required: false
+        default: false
+  push:
+    tags:
+      - "libedgetpu-v*"
+
+permissions:
+  contents: read
+
+env:
+  BAZEL_VERSION: "6.5.0"
+  # The whole point of this repo. Bonnell is the Intel Atom microarchitecture:
+  # SSE, SSE2, SSSE3 and nothing newer.
+  SSSE3_COPTS: >-
+    --copt=-march=bonnell
+    --copt=-mno-sse4.1
+    --copt=-mno-sse4.2
+    --copt=-mno-avx
+    --copt=-mno-avx2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:bookworm
+    steps:
+      - name: Install build dependencies
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            build-essential git ca-certificates curl wget unzip zip \
+            python3 python3-numpy pkg-config zlib1g-dev libusb-1.0-0-dev \
+            xxd binutils file
+          gcc --version | head -1
+          ldd --version | head -1
+
+      - name: Install bazel
+        run: |
+          set -eux
+          wget -q -O /tmp/bazel-installer.sh \
+            "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-installer-linux-x86_64.sh"
+          bash /tmp/bazel-installer.sh
+          bazel --version
+
+      - name: Check out libedgetpu
+        env:
+          # Via env rather than inline ${{ }} so a crafted ref cannot inject shell.
+          REF: ${{ github.event.inputs.libedgetpu_ref || 'master' }}
+        run: |
+          set -eux
+          git clone https://github.com/google-coral/libedgetpu.git /tmp/libedgetpu
+          cd /tmp/libedgetpu
+          git checkout "$REF"
+          git rev-parse HEAD | tee /tmp/libedgetpu-commit.txt
+
+      - name: Build
+        env:
+          THROTTLED: ${{ github.event.inputs.throttled }}
+        run: |
+          set -eux
+          cd /tmp/libedgetpu
+          THROTTLE=""
+          if [ "$THROTTLED" = "true" ]; then
+            THROTTLE="--copt=-DTHROTTLE_EDGE_TPU"
+          fi
+          # --copt applies to the target configuration only, so bazel's own
+          # host tools still build for the runner's native CPU.
+          # shellcheck disable=SC2086
+          bazel build \
+            --compilation_mode=opt \
+            --cpu=k8 \
+            --stripopt=-x \
+            $SSSE3_COPTS \
+            $THROTTLE \
+            //tflite/public:libedgetpu_direct_all.so.stripped
+          mkdir -p /tmp/out
+          cp -f bazel-bin/tflite/public/libedgetpu_direct_all.so.stripped \
+                /tmp/out/libedgetpu.so.1.0
+          file /tmp/out/libedgetpu.so.1.0
+
+      # Every check below is a gate: the job fails rather than publishing a
+      # binary with the defect. These are the four ways this build can be
+      # silently wrong.
+      - name: Verify — USB support is linked in
+        run: |
+          set -eux
+          LIB=/tmp/out/libedgetpu.so.1.0
+          readelf -d "$LIB" | grep -q 'NEEDED.*libusb-1\.0' \
+            || { echo "FAIL: libusb-1.0 not in NEEDED -- this is a PCIe-only build"; exit 1; }
+          nm -Du "$LIB" | grep -q 'libusb_' \
+            || { echo "FAIL: no undefined libusb_* symbols -- USB provider not linked"; exit 1; }
+          echo "OK: USB transport is linked"
+
+      - name: Verify — PCIe support is still linked in
+        run: |
+          set -eux
+          LIB=/tmp/out/libedgetpu.so.1.0
+          strings -a "$LIB" | grep -q 'BeaglePciDriverProvider' \
+            || { echo "FAIL: PCIe driver provider missing -- would break existing users"; exit 1; }
+          echo "OK: PCIe transport is linked"
+
+      - name: Verify — glibc requirement fits the Frigate container
+        run: |
+          set -eux
+          LIB=/tmp/out/libedgetpu.so.1.0
+          MAX=$(objdump -T "$LIB" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+          echo "max GLIBC required: ${MAX}"
+          # Frigate 0.17 is Debian 12 / glibc 2.36.
+          if [ "$(printf '%s\n2.36\n' "$MAX" | sort -V | tail -1)" != "2.36" ]; then
+            echo "FAIL: needs GLIBC_${MAX}, Frigate's container has 2.36"
+            exit 1
+          fi
+          echo "OK: loads on glibc 2.36"
+
+      - name: Verify — no SSE4/AVX instructions
+        run: |
+          set -eux
+          objdump -d /tmp/out/libedgetpu.so.1.0 > /tmp/disasm.txt
+          python3 - <<'PY'
+          import re, sys, collections
+          # Heuristic backstop. The real guarantee is the -mno-* compiler flags;
+          # this catches hand-written asm and anything the flags did not reach.
+          SSE4 = {
+            "blendpd","blendps","blendvpd","blendvps","dppd","dpps","extractps",
+            "insertps","movntdqa","mpsadbw","packusdw","pblendvb","pblendw",
+            "pcmpeqq","pextrb","pextrd","pextrq","phminposuw","pinsrb","pinsrd",
+            "pinsrq","pmaxsb","pmaxsd","pmaxud","pmaxuw","pminsb","pminsd",
+            "pminud","pminuw","pmuldq","pmulld","ptest","roundpd","roundps",
+            "roundsd","roundss","crc32","pcmpestri","pcmpestrm","pcmpistri",
+            "pcmpistrm","pcmpgtq","popcnt",
+          }
+          SSE4 |= {"pmovsx"+s for s in ("bw","bd","bq","wd","wq","dq")}
+          SSE4 |= {"pmovzx"+s for s in ("bw","bd","bq","wd","wq","dq")}
+          bad = collections.Counter()
+          # objdump line: "  4a1b:\t66 0f 38 17 c1  \tptest  %xmm1,%xmm0"
+          line_re = re.compile(r"^\s+[0-9a-f]+:\t[0-9a-f ]+\t\s*([a-z0-9.]+)(.*)$")
+          for line in open("/tmp/disasm.txt"):
+              m = line_re.match(line)
+              if not m:
+                  continue
+              mnem, ops = m.group(1), m.group(2)
+              base = mnem.split(".")[0]
+              if base in SSE4:
+                  bad[base] += 1
+              # AVX/AVX2: VEX-encoded forms and the 256-bit register file.
+              elif "%ymm" in ops or "%zmm" in ops:
+                  bad[mnem + " (ymm/zmm)"] += 1
+              elif base.startswith("v") and "%xmm" in ops and base[1:] in SSE4 | {
+                  "addps","addpd","mulps","mulpd","subps","subpd","movaps",
+                  "movups","movdqa","movdqu","xorps","xorpd","andps","andpd",
+                  "cmpps","cmppd","pxor","paddd","psubd","pand","por",
+              }:
+                  bad[mnem + " (VEX)"] += 1
+          if bad:
+              print("FAIL: found instructions beyond SSSE3:")
+              for k, v in bad.most_common():
+                  print(f"  {k}: {v}")
+              sys.exit(1)
+          print("OK: no SSE4.1/SSE4.2/AVX instructions found")
+          PY
+
+      - name: Record build provenance
+        run: |
+          set -eux
+          LIB=/tmp/out/libedgetpu.so.1.0
+          {
+            echo "libedgetpu commit: $(cat /tmp/libedgetpu-commit.txt)"
+            echo "bazel target:      //tflite/public:libedgetpu_direct_all.so.stripped"
+            echo "copts:             ${SSSE3_COPTS}"
+            echo "throttled:         ${{ github.event.inputs.throttled || 'false' }}"
+            echo "build container:   debian:bookworm ($(ldd --version | head -1))"
+            echo "gcc:               $(gcc --version | head -1)"
+            echo "sha256:            $(sha256sum "$LIB" | cut -d' ' -f1)"
+            echo "NEEDED:"
+            readelf -d "$LIB" | grep NEEDED | sed 's/^/  /'
+            echo "max GLIBC:         $(objdump -T "$LIB" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"
+            echo "built:             ${{ github.run_id }} on ${{ github.sha }}"
+          } | tee /tmp/out/BUILD-INFO.txt
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: libedgetpu-ssse3-usb-pci
+          path: /tmp/out/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/libedgetpu-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: libedgetpu-ssse3-usb-pci
+          path: out
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/libedgetpu.so.1.0
+            out/BUILD-INFO.txt
