@@ -21,6 +21,28 @@ The kernel driver build in [`gasket/`](gasket/) is maintained separately from
 the binaries and targets the kernels openmediavault ships today — see
 [Kernel driver on openmediavault](#kernel-driver-on-openmediavault).
 
+## PCIe only — USB Coral is not supported by the current binary
+
+The `libedgetpu.so.1.0` committed under `binaries/` was built from bazel's
+**PCIe-only** target, so it does not link libusb and cannot see a Coral USB
+Accelerator. If you plug one in you get `No EdgeTPU was detected`, with nothing
+in the logs to explain why. Confirm for yourself:
+
+```bash
+readelf -d binaries/libedgetpu.so.1.0 | grep -c libusb   # 0 = PCIe only
+```
+
+A USB-capable build — one library serving both transports, which is upstream's
+default for Linux — is produced by
+[`.github/workflows/build-libedgetpu.yml`](.github/workflows/build-libedgetpu.yml)
+and published as a release asset rather than committed here.
+
+> **USB is untested on real hardware.** The build is gated on linkage,
+> glibc and instruction-set checks, but nobody has yet run a USB Coral against
+> it. Treat any USB release asset as a beta, and please report results on
+> [#1](https://github.com/thatSFguy/coral-edgetpu-legacy-cpu/issues/1).
+> The PCIe path is the tested one.
+
 ## Check If You Need This
 
 ```bash
@@ -231,6 +253,7 @@ Try booting with `pcie_aspm=off` (add it to `GRUB_CMDLINE_LINUX_DEFAULT` in
 | Component | Version | Source |
 |-----------|---------|--------|
 | libedgetpu | master @ e35aed1 | https://github.com/google-coral/libedgetpu |
+| libedgetpu bazel target | `libedgetpu_direct_pci.so` (**PCIe only, no USB**) | - |
 | tflite_runtime | 2.17.1 | https://github.com/tensorflow/tensorflow @ v2.17.1 |
 | Build container | debian:bookworm | Debian 12 Bookworm |
 | glibc | 2.36 | Debian 12 Bookworm |
